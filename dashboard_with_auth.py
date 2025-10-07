@@ -9,6 +9,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 import os
 
+
+
 st.set_page_config(
     page_title="Museum Analytics Dashboard", 
     layout="wide",
@@ -30,30 +32,257 @@ try:
 except Exception as e:
     st.warning(f"Supabase client not initialized: {e}")
 
+# Database helper functions
+def create_admin_account(username, password, email, role="admin"):
+    """
+    Create a new admin account in the admin_users table.
+    Uses the existing admin_users table structure with bigserial id,
+    username, email, password_hash, role, created_at, and last_login.
+    """
+    if not supabase:
+        return False, "Database connection not available"
+    
+    try:
+        # Check if username already exists
+        existing_user = supabase.table("admin_users").select("username").eq("username", username).execute()
+        if existing_user.data:
+            return False, "Username already exists"
+        
+        # Check if email already exists
+        existing_email = supabase.table("admin_users").select("email").eq("email", email).execute()
+        if existing_email.data:
+            return False, "Email already exists"
+        
+        # Hash password and create admin user
+        password_hash = hash_password(password)
+        admin_data = {
+            "username": username,
+            "email": email,
+            "password_hash": password_hash,
+            "role": role
+        }
+        
+        response = supabase.table("admin_users").insert(admin_data).execute()
+        return True, "Admin account created successfully"
+        
+    except Exception as e:
+        return False, f"Error creating admin account: {str(e)}"
+
 # Authentication functions
 def hash_password(password):
     import hashlib
     return hashlib.sha256(password.encode()).hexdigest()
 
 def authenticate_user(username, password):
-    # Demo credentials - in production, use database
-    demo_users = {
-        "admin": hash_password("admin123"),
-        "manager": hash_password("manager123"),
-        "analyst": hash_password("analyst123")
-    }
+    """
+    Authenticate admin user against Supabase admin_users table.
+    Returns True if authentication successful, False otherwise.
+    Also updates last_login timestamp on successful authentication.
+    """
+    if not supabase:
+        st.error("Database connection not available. Please check configuration.")
+        return False
     
-    if username in demo_users:
-        return demo_users[username] == hash_password(password)
-    return False
+    try:
+        # Hash the provided password for comparison
+        password_hash = hash_password(password)
+        
+        # Query the admin_users table for matching credentials
+        response = supabase.table("admin_users").select("*").eq("username", username).eq("password_hash", password_hash).execute()
+        
+        if response.data and len(response.data) > 0:
+            # User found and password matches
+            user_data = response.data[0]
+            user_id = user_data.get("id")
+            
+            # Update last_login timestamp
+            try:
+                supabase.table("admin_users").update({"last_login": datetime.now().isoformat()}).eq("id", user_id).execute()
+            except Exception as login_error:
+                # Don't fail auth if we can't update last_login
+                st.warning(f"Could not update last login: {login_error}")
+            
+            # Store user info in session
+            st.session_state.user_role = user_data.get("role", "admin")
+            st.session_state.user_id = user_id
+            st.session_state.user_email = user_data.get("email")
+            return True
+        else:
+            return False
+            
+    except Exception as e:
+        st.error(f"Authentication error: {str(e)}")
+        return False
 
 def init_session_state():
     if 'logged_in' not in st.session_state:
         st.session_state.logged_in = False
     if 'username' not in st.session_state:
         st.session_state.username = ""
+    if 'user_role' not in st.session_state:
+        st.session_state.user_role = ""
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = None
+    if 'user_email' not in st.session_state:
+        st.session_state.user_email = ""
     if 'login_attempts' not in st.session_state:
         st.session_state.login_attempts = 0
+
+# ================================================================
+# DATA FETCHING FUNCTIONS FOR MUSEUM ANALYTICS
+# ================================================================
+
+def fetch_daily_metrics():
+    """Fetch daily metrics data with environment conditions."""
+    try:
+        if not supabase:
+            return None
+        
+        response = supabase.table("daily_metrics").select(
+            "*, environment_conditions(condition, temperature_c, humidity, season)"
+        ).order("date", desc=True).execute()
+        
+        return pd.DataFrame(response.data) if response.data else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error fetching daily metrics: {str(e)}")
+        return pd.DataFrame()
+
+def fetch_models():
+    """Fetch all models with their statistics."""
+    try:
+        if not supabase:
+            return None
+        
+        response = supabase.table("models").select("*").execute()
+        return pd.DataFrame(response.data) if response.data else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error fetching models: {str(e)}")
+        return pd.DataFrame()
+
+def fetch_model_events(model_id=None, limit=100):
+    """Fetch model scan events, optionally filtered by model."""
+    try:
+        if not supabase:
+            return None
+        
+        query = supabase.table("model_events").select(
+            "*, models(qr_name, description), admin_users(username)"
+        ).order("created_at", desc=True).limit(limit)
+        
+        if model_id:
+            query = query.eq("model_id", model_id)
+            
+        response = query.execute()
+        return pd.DataFrame(response.data) if response.data else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error fetching model events: {str(e)}")
+        return pd.DataFrame()
+
+def fetch_view_sessions(model_id=None, limit=100):
+    """Fetch model view sessions with duration statistics."""
+    try:
+        if not supabase:
+            return None
+            
+        query = supabase.table("model_view_sessions").select(
+            "*, models(qr_name, description), admin_users(username)"
+        ).order("started_at", desc=True).limit(limit)
+        
+        if model_id:
+            query = query.eq("model_id", model_id)
+            
+        response = query.execute()
+        return pd.DataFrame(response.data) if response.data else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error fetching view sessions: {str(e)}")
+        return pd.DataFrame()
+
+def fetch_visitor_profiles():
+    """Fetch visitor demographic data."""
+    try:
+        if not supabase:
+            return None
+            
+        response = supabase.table("visitor_profiles").select("*").execute()
+        return pd.DataFrame(response.data) if response.data else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error fetching visitor profiles: {str(e)}")
+        return pd.DataFrame()
+
+def fetch_environment_conditions(limit=100):
+    """Fetch recent environment conditions."""
+    try:
+        if not supabase:
+            return None
+            
+        response = supabase.table("environment_conditions").select("*").order(
+            "recorded_at", desc=True
+        ).limit(limit).execute()
+        
+        return pd.DataFrame(response.data) if response.data else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error fetching environment conditions: {str(e)}")
+        return pd.DataFrame()
+
+def fetch_session_context(limit=100):
+    """Fetch session context with related data."""
+    try:
+        if not supabase:
+            return None
+            
+        response = supabase.table("session_context").select(
+            """*, 
+            model_view_sessions(*, models(qr_name, description)), 
+            environment_conditions(condition, temperature_c, humidity, season),
+            visitor_profiles(age_group, country, preferred_language)"""
+        ).order("day", desc=True).limit(limit).execute()
+        
+        return pd.DataFrame(response.data) if response.data else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error fetching session context: {str(e)}")
+        return pd.DataFrame()
+
+def get_analytics_summary():
+    """Get comprehensive analytics summary across all tables."""
+    try:
+        if not supabase:
+            return {}
+            
+        summary = {}
+        
+        # Total models
+        models_response = supabase.table("models").select("id", count="exact").execute()
+        summary['total_models'] = models_response.count or 0
+        
+        # Total events today
+        from datetime import datetime, date
+        today = date.today().isoformat()
+        events_response = supabase.table("model_events").select(
+            "id", count="exact"
+        ).gte("created_at", today).execute()
+        summary['events_today'] = events_response.count or 0
+        
+        # Active sessions today
+        sessions_response = supabase.table("model_view_sessions").select(
+            "id", count="exact"
+        ).gte("started_at", today).execute()
+        summary['sessions_today'] = sessions_response.count or 0
+        
+        # Average session duration
+        duration_response = supabase.table("model_view_sessions").select(
+            "duration_seconds"
+        ).not_.is_("ended_at", "null").execute()
+        
+        if duration_response.data:
+            durations = [s['duration_seconds'] for s in duration_response.data if s['duration_seconds']]
+            summary['avg_duration'] = sum(durations) / len(durations) if durations else 0
+        else:
+            summary['avg_duration'] = 0
+            
+        return summary
+    except Exception as e:
+        st.error(f"Error fetching analytics summary: {str(e)}")
+        return {}
 
 def show_login_page():
     st.markdown("""
@@ -101,10 +330,8 @@ def show_login_page():
                 🏛️ Museum Dashboard
             </div>
             <div class="demo-credentials">
-                <strong>📋 Demo Credentials:</strong><br>
-                👤 admin / admin123<br>
-                👤 manager / manager123<br>
-                👤 analyst / analyst123
+                <strong>🔐 Secure Database Authentication</strong><br>
+                Please use your admin credentials to log in.
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -256,10 +483,48 @@ else:
     # Main dashboard tabs
     tab1, tab2, tab3, tab4 = st.tabs(["🔮 Prediction", "📊 Analytics", "🏛️ Artifacts", "👥 Users"])
 
-    # --- Prediction Tab ---
+    # --- Enhanced Prediction Tab with Real Data ---
     with tab1:
-        st.markdown('<div class="tab-header">🔮 AI-Powered Predictions</div>', unsafe_allow_html=True)
+        st.markdown('<div class="tab-header">🔮 AI-Powered Visitor Predictions</div>', unsafe_allow_html=True)
         
+        # Real-time data insights section
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.markdown("#### 📊 Current Museum Conditions")
+            
+            # Fetch latest environment data
+            env_df = fetch_environment_conditions(limit=5)
+            if not env_df.empty:
+                latest_env = env_df.iloc[0]
+                col_a, col_b, col_c = st.columns(3)
+                
+                with col_a:
+                    condition = latest_env.get('condition', 'Unknown')
+                    st.metric("🌤️ Current Weather", condition)
+                
+                with col_b:
+                    temp = latest_env.get('temperature_c', 0)
+                    st.metric("🌡️ Temperature", f"{temp:.1f}°C")
+                
+                with col_c:
+                    humidity = latest_env.get('humidity', 0)
+                    st.metric("💧 Humidity", f"{humidity:.1f}%")
+            else:
+                st.info("🌤️ No environment data available - using default values")
+        
+        with col2:
+            st.markdown("#### 👥 Visitor Insights")
+            visitor_profiles = fetch_visitor_profiles()
+            if not visitor_profiles.empty:
+                total_profiles = len(visitor_profiles)
+                most_common_age = visitor_profiles['age_group'].mode().iloc[0] if 'age_group' in visitor_profiles.columns else 'Adult'
+                st.metric("📝 Total Profiles", total_profiles)
+                st.metric("👤 Common Age Group", most_common_age)
+            else:
+                st.info("👥 No visitor profiles yet")
+        
+        # Enhanced prediction interface
         col1, col2, col3 = st.columns([1, 2, 1])
         
         with col2:
@@ -278,60 +543,117 @@ else:
             if pipeline_loaded:
                 try:
                     feature_names = list(getattr(loaded_pipeline, 'feature_names_in_', []))
+                    
+                    # Dynamic options from database
+                    visitor_profiles = fetch_visitor_profiles()
+                    env_conditions = fetch_environment_conditions(limit=20)
+                    
+                    # Build categorical options from real data where possible
                     categorical_options = {
-                        'env_condition': ["☁️ Cloudy", "☀️ Sunny", "🌧️ Rainy", "💨 Windy", "🌫️ Other"],
+                        'env_condition': ["☁️ Cloudy", "☀️ Sunny", "🌧️ Rainy", "⛈️ Stormy", "💨 Windy", "🌫️ Clear"],
                         'env_season': ["🌸 Spring", "☀️ Summer", "🍂 Autumn", "❄️ Winter"],
-                        'visitor_age_group': ["👶 Teen", "👨 Adult", "👴 Senior", "🧒 Child"],
-                        'event_event_type': ["📱 Scan", "🔄 Other"],
+                        'visitor_age_group': ["👶 Child", "👨 Teen", "� Adult", "👴 Senior"],
+                        'event_event_type': ["📱 Scan"],
                     }
+                    
+                    # Add real data options if available
+                    if not visitor_profiles.empty:
+                        if 'age_group' in visitor_profiles.columns:
+                            real_age_groups = visitor_profiles['age_group'].unique()
+                            categorical_options['visitor_age_group'] = [f"� {age}" for age in real_age_groups]
+                        
+                        if 'country' in visitor_profiles.columns:
+                            top_countries = visitor_profiles['country'].value_counts().head(5).index.tolist()
+                        else:
+                            top_countries = ['USA', 'UK', 'Germany', 'France', 'Spain']
+                    else:
+                        top_countries = ['USA', 'UK', 'Germany', 'France', 'Spain']
                     
                     st.markdown('<div class="prediction-form">', unsafe_allow_html=True)
                     
-                    with st.form("prediction_form"):
-                        st.markdown("### 📊 Input Parameters")
+                    with st.form("enhanced_prediction_form"):
+                        st.markdown("### 📊 Prediction Parameters (Enhanced with Real Data)")
+                        
+                        # Quick presets based on current conditions
+                        st.markdown("#### ⚡ Quick Presets")
+                        preset_col1, preset_col2, preset_col3 = st.columns(3)
+                        
+                        with preset_col1:
+                            if st.form_submit_button("🌞 Sunny Day Preset"):
+                                st.session_state.preset = "sunny"
+                        with preset_col2:
+                            if st.form_submit_button("🌧️ Rainy Day Preset"):
+                                st.session_state.preset = "rainy"
+                        with preset_col3:
+                            if st.form_submit_button("📊 Current Conditions"):
+                                st.session_state.preset = "current"
+                        
+                        st.markdown("#### 📝 Manual Input")
                         
                         # Organize inputs in columns
                         col_left, col_right = st.columns(2)
                         
                         user_inputs = {}
-                        left_features = feature_names[:len(feature_names)//2]
-                        right_features = feature_names[len(feature_names)//2:]
+                        
+                        # Set defaults based on real data or presets
+                        env_default_condition = env_df.iloc[0]['condition'] if not env_df.empty else 'Sunny'
+                        env_default_temp = float(env_df.iloc[0]['temperature_c']) if not env_df.empty else 20.0
+                        env_default_humidity = float(env_df.iloc[0]['humidity']) if not env_df.empty else 50.0
+                        env_default_season = env_df.iloc[0]['season'] if not env_df.empty else 'Summer'
                         
                         with col_left:
-                            for feature in left_features:
-                                label = "🏷️ " + feature.replace('_', ' ').title()
-                                if feature in categorical_options:
-                                    user_inputs[feature] = st.selectbox(label, categorical_options[feature], key=f"left_{feature}")
-                                    user_inputs[feature] = user_inputs[feature].split(' ', 1)[1] if ' ' in user_inputs[feature] else user_inputs[feature]
-                                elif feature in ['visitor_preferred_language', 'visitor_country']:
-                                    user_inputs[feature] = st.text_input(label, placeholder=f"Enter {feature.replace('_', ' ')}...", key=f"left_{feature}")
-                                else:
-                                    user_inputs[feature] = st.number_input(label, min_value=0.0, key=f"left_{feature}")
+                            st.markdown("**🌍 Environment Conditions**")
+                            user_inputs['env_condition'] = st.selectbox(
+                                "🌤️ Weather Condition", 
+                                [opt.split(' ', 1)[1] for opt in categorical_options['env_condition']],
+                                index=0
+                            )
+                            user_inputs['env_temperature_c'] = st.number_input(
+                                "🌡️ Temperature (°C)", 
+                                min_value=-10.0, max_value=50.0, 
+                                value=env_default_temp,
+                                step=0.5
+                            )
+                            user_inputs['env_humidity'] = st.number_input(
+                                "💧 Humidity (%)", 
+                                min_value=0.0, max_value=100.0, 
+                                value=env_default_humidity,
+                                step=1.0
+                            )
+                            user_inputs['env_season'] = st.selectbox(
+                                "🗓️ Season",
+                                [opt.split(' ', 1)[1] for opt in categorical_options['env_season']]
+                            )
                         
                         with col_right:
-                            for feature in right_features:
-                                label = "🏷️ " + feature.replace('_', ' ').title()
-                                if feature in categorical_options:
-                                    user_inputs[feature] = st.selectbox(label, categorical_options[feature], key=f"right_{feature}")
-                                    user_inputs[feature] = user_inputs[feature].split(' ', 1)[1] if ' ' in user_inputs[feature] else user_inputs[feature]
-                                elif feature in ['visitor_preferred_language', 'visitor_country']:
-                                    user_inputs[feature] = st.text_input(label, placeholder=f"Enter {feature.replace('_', ' ')}...", key=f"right_{feature}")
-                                else:
-                                    user_inputs[feature] = st.number_input(label, min_value=0.0, key=f"right_{feature}")
+                            st.markdown("**👤 Visitor Profile**")
+                            user_inputs['visitor_age_group'] = st.selectbox(
+                                "👥 Target Age Group",
+                                [opt.split(' ', 1)[1] for opt in categorical_options['visitor_age_group']]
+                            )
+                            user_inputs['visitor_country'] = st.selectbox(
+                                "🌍 Visitor Country",
+                                top_countries
+                            )
+                            user_inputs['visitor_preferred_language'] = st.selectbox(
+                                "🗣️ Preferred Language",
+                                ['English', 'Spanish', 'French', 'German', 'Italian', 'Other']
+                            )
+                            user_inputs['event_event_type'] = 'Scan'  # Default to scan events
                         
                         st.markdown("<br>", unsafe_allow_html=True)
-                        submit = st.form_submit_button("🚀 Generate Prediction", use_container_width=True)
+                        submit = st.form_submit_button("🚀 Generate Visitor Prediction", use_container_width=True)
                     
                     st.markdown('</div>', unsafe_allow_html=True)
                     
                     if submit:
-                        with st.spinner("🔄 Processing prediction..."):
+                        with st.spinner("🔄 Processing prediction with real museum data..."):
                             input_data = pd.DataFrame({k: [v] for k, v in user_inputs.items()})
                             try:
                                 prediction = loaded_pipeline.predict(input_data)
                                 
-                                # Modern result display with rounded customer count
-                                predicted_customers = round(prediction[0])
+                                # Enhanced result display
+                                predicted_visitors = round(prediction[0])
                                 st.balloons()
                                 st.markdown(f"""
                                 <div style="
@@ -345,19 +667,28 @@ else:
                                     margin: 1rem 0;
                                     box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
                                 ">
-                                    🎯 Predicted Customers: <span style="font-size: 2rem; font-weight: 800;">{predicted_customers}</span>
+                                    🎯 Predicted Visitors: <span style="font-size: 2rem; font-weight: 800;">{predicted_visitors}</span>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
-                                # Additional insights
-                                col1, col2, col3 = st.columns(3)
+                                # Enhanced insights with real data context
+                                col1, col2, col3, col4 = st.columns(4)
                                 with col1:
-                                    st.metric("🧮 Exact Value", f"{prediction[0]:.3f}", help="Raw model output before rounding")
+                                    st.metric("🧮 Exact Value", f"{prediction[0]:.3f}", help="Raw model output")
                                 with col2:
-                                    st.metric("👥 Expected Visitors", f"{predicted_customers}", help="Rounded to whole number")
+                                    st.metric("👥 Expected Visitors", f"{predicted_visitors}", help="Rounded prediction")
                                 with col3:
-                                    confidence_level = "High" if abs(prediction[0] - predicted_customers) < 0.1 else "Medium"
-                                    st.metric("📊 Confidence", confidence_level, help="Based on rounding difference")
+                                    confidence_level = "High" if abs(prediction[0] - predicted_visitors) < 0.1 else "Medium"
+                                    st.metric("📊 Confidence", confidence_level, help="Prediction confidence")
+                                with col4:
+                                    # Compare with recent averages
+                                    daily_metrics = fetch_daily_metrics()
+                                    if not daily_metrics.empty and 'total_visitors' in daily_metrics.columns:
+                                        avg_visitors = daily_metrics['total_visitors'].mean()
+                                        comparison = "Above Average" if predicted_visitors > avg_visitors else "Below Average"
+                                        st.metric("📈 vs Historical", comparison, help=f"Historical avg: {avg_visitors:.0f}")
+                                    else:
+                                        st.metric("📈 Data Status", "First Prediction", help="No historical data yet")
                                 
                             except Exception as e:
                                 st.error(f"❌ Prediction Error: {e}")
@@ -366,224 +697,520 @@ else:
                     st.error(f"❌ Form Generation Error: {e}")
             else:
                 st.warning("⚠️ ML Pipeline not available. Please check system configuration.")
-
-    # --- Admin Visualization Tab ---
-    with tab2:
-        st.markdown('<div class="tab-header">📊 Advanced Analytics Dashboard</div>', unsafe_allow_html=True)
         
-        # Modern metrics row
+        # Real data insights section
+        st.markdown("---")
+        st.markdown("#### 📈 Historical Performance Insights")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            # Show recent daily metrics if available
+            daily_metrics = fetch_daily_metrics()
+            if not daily_metrics.empty:
+                recent_days = min(7, len(daily_metrics))
+                recent_metrics = daily_metrics.head(recent_days)
+                
+                fig = px.line(
+                    x=pd.to_datetime(recent_metrics['date']), 
+                    y=recent_metrics['total_visitors'],
+                    title="📊 Recent Visitor Trends",
+                    labels={'x': 'Date', 'y': 'Visitors'}
+                )
+                fig.update_layout(height=300)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("📊 No historical visitor data available yet")
+        
+        with col2:
+            # Show environment impact on visitors
+            env_conditions = fetch_environment_conditions()
+            if not env_conditions.empty and not daily_metrics.empty:
+                # Try to correlate environment with visitor numbers
+                st.markdown("**🌤️ Weather Impact Analysis**")
+                if 'condition' in env_conditions.columns:
+                    condition_counts = env_conditions['condition'].value_counts()
+                    fig = px.bar(
+                        x=condition_counts.index,
+                        y=condition_counts.values,
+                        title="Weather Frequency",
+                        labels={'x': 'Condition', 'y': 'Days'}
+                    )
+                    fig.update_layout(height=300)
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("🌤️ No environment correlation data available yet")
+
+    # --- Real-Time Analytics Tab ---
+    with tab2:
+        st.markdown('<div class="tab-header">📊 Live Museum Analytics Dashboard</div>', unsafe_allow_html=True)
+        
+        # Fetch real analytics summary
+        analytics_summary = get_analytics_summary()
+        
+        # Real-time metrics row
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.markdown("""
+            total_models = analytics_summary.get('total_models', 0)
+            st.markdown(f"""
             <div class="metric-card">
-                <h3>👥 Total Visitors</h3>
-                <h2>12,458</h2>
-                <p>↗️ +23% from last month</p>
+                <h3>🏛️ Total Models</h3>
+                <h2>{total_models}</h2>
+                <p>📊 Active in collection</p>
             </div>
             """, unsafe_allow_html=True)
         
         with col2:
-            st.markdown("""
+            events_today = analytics_summary.get('events_today', 0)
+            st.markdown(f"""
             <div class="metric-card">
-                <h3>🎯 Engagement Rate</h3>
-                <h2>87.3%</h2>
-                <p>↗️ +5.2% from last week</p>
+                <h3>🔍 Scans Today</h3>
+                <h2>{events_today}</h2>
+                <p>📈 QR code scans</p>
             </div>
             """, unsafe_allow_html=True)
         
         with col3:
-            st.markdown("""
+            sessions_today = analytics_summary.get('sessions_today', 0)
+            st.markdown(f"""
             <div class="metric-card">
-                <h3>⏱️ Avg. Duration</h3>
-                <h2>45m</h2>
-                <p>↘️ -2m from last month</p>
+                <h3>👀 Sessions Today</h3>
+                <h2>{sessions_today}</h2>
+                <p>🎯 Active viewing sessions</p>
             </div>
             """, unsafe_allow_html=True)
         
         with col4:
-            st.markdown("""
+            avg_duration = analytics_summary.get('avg_duration', 0)
+            duration_minutes = int(avg_duration / 60) if avg_duration else 0
+            st.markdown(f"""
             <div class="metric-card">
-                <h3>🏆 Satisfaction</h3>
-                <h2>4.8/5</h2>
-                <p>↗️ +0.3 from last quarter</p>
+                <h3>⏱️ Avg. Duration</h3>
+                <h2>{duration_minutes}m</h2>
+                <p>📊 Per viewing session</p>
             </div>
             """, unsafe_allow_html=True)
         
         st.markdown("<br><br>", unsafe_allow_html=True)
         
-        # Sample interactive charts
-        st.markdown("#### 📈 Sample Analytics (Demo Data)")
+        # Real data visualizations
+        st.markdown("#### 📈 Live Analytics from Database")
         
         col1, col2 = st.columns(2)
         
         with col1:
-            # Sample visitor trends
-            dates = pd.date_range('2024-01-01', periods=30, freq='D')
-            visitors = [100 + i*2 + (i%7)*10 for i in range(30)]
-            
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=dates,
-                y=visitors,
-                mode='lines+markers',
-                name='Daily Visitors',
-                line=dict(color='#667eea', width=3),
-                marker=dict(size=6, color='#764ba2')
-            ))
-            
-            fig.update_layout(
-                title="Daily Visitor Trends",
-                xaxis_title="Date",
-                yaxis_title="Number of Visitors",
-                height=400,
-                template='plotly_white'
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            # Daily metrics from database
+            daily_metrics_df = fetch_daily_metrics()
+            if not daily_metrics_df.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=pd.to_datetime(daily_metrics_df['date']),
+                    y=daily_metrics_df['total_visitors'],
+                    mode='lines+markers',
+                    name='Daily Visitors',
+                    line=dict(color='#667eea', width=3),
+                    marker=dict(size=6, color='#764ba2')
+                ))
+                
+                fig.update_layout(
+                    title="Daily Visitor Trends (Real Data)",
+                    xaxis_title="Date",
+                    yaxis_title="Number of Visitors",
+                    height=400,
+                    template='plotly_white'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("📊 No daily metrics data available yet. Add some sample data to your database!")
         
         with col2:
-            # Sample age distribution
-            age_data = pd.DataFrame({
-                'Age Group': ['Child', 'Teen', 'Adult', 'Senior'],
-                'Count': [150, 280, 450, 120]
-            })
-            
-            fig = px.pie(age_data, values='Count', names='Age Group',
-                        color_discrete_sequence=['#667eea', '#764ba2', '#f093fb', '#4facfe'],
-                        title="Visitor Age Distribution")
-            fig.update_traces(textposition='inside', textinfo='percent+label')
-            fig.update_layout(height=400)
-            st.plotly_chart(fig, use_container_width=True)
-
-    # --- Artifact Management Tab ---
-    with tab3:
-        st.markdown('<div class="tab-header">🏛️ Artifact Collection Manager</div>', unsafe_allow_html=True)
+            # Visitor age distribution from database
+            visitor_profiles_df = fetch_visitor_profiles()
+            if not visitor_profiles_df.empty and 'age_group' in visitor_profiles_df.columns:
+                age_counts = visitor_profiles_df['age_group'].value_counts()
+                
+                fig = px.pie(
+                    values=age_counts.values, 
+                    names=age_counts.index,
+                    color_discrete_sequence=['#667eea', '#764ba2', '#f093fb', '#4facfe'],
+                    title="Visitor Age Distribution (Real Data)"
+                )
+                fig.update_traces(textposition='inside', textinfo='percent+label')
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("👥 No visitor profile data available yet. Visitor demographics will appear here once data is collected!")
         
-        tab_add, tab_remove = st.tabs(["➕ Add New Artifact", "🗑️ Remove Artifact"])
+        # Model activity heatmap
+        st.markdown("#### 🔥 Model Interaction Heatmap")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Model events analysis
+            events_df = fetch_model_events(limit=50)
+            if not events_df.empty:
+                # Extract model names and count events
+                if 'models' in events_df.columns:
+                    model_names = []
+                    for idx, row in events_df.iterrows():
+                        if row['models'] and isinstance(row['models'], dict):
+                            model_names.append(row['models'].get('qr_name', 'Unknown'))
+                        else:
+                            model_names.append('Unknown')
+                    
+                    events_df['model_name'] = model_names
+                    model_events = events_df['model_name'].value_counts()
+                    
+                    fig = px.bar(
+                        x=model_events.index, 
+                        y=model_events.values,
+                        labels={'x': 'Model Name', 'y': 'Number of Scans'},
+                        title="Most Scanned Models",
+                        color=model_events.values,
+                        color_continuous_scale='Blues'
+                    )
+                    fig.update_layout(height=350)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("📊 Model event data structure doesn't match expected format")
+            else:
+                st.info("🔍 No model scan events recorded yet")
+        
+        with col2:
+            # Environment conditions impact
+            env_df = fetch_environment_conditions(limit=30)
+            if not env_df.empty and 'condition' in env_df.columns:
+                condition_counts = env_df['condition'].value_counts()
+                
+                fig = px.bar(
+                    x=condition_counts.index,
+                    y=condition_counts.values,
+                    labels={'x': 'Weather Condition', 'y': 'Frequency'},
+                    title="Weather Conditions Distribution",
+                    color=condition_counts.values,
+                    color_continuous_scale='Viridis'
+                )
+                fig.update_layout(height=350)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("🌤️ No environment data available yet")
+        
+        # Recent activity timeline
+        st.markdown("#### ⏰ Recent Model Activity")
+        recent_events = fetch_model_events(limit=10)
+        if not recent_events.empty:
+            # Display recent events in a nice format
+            for idx, event in recent_events.iterrows():
+                model_name = "Unknown Model"
+                if event.get('models') and isinstance(event['models'], dict):
+                    model_name = event['models'].get('qr_name', 'Unknown Model')
+                
+                admin_name = "System"
+                if event.get('admin_users') and isinstance(event['admin_users'], dict):
+                    admin_name = event['admin_users'].get('username', 'System')
+                
+                event_time = pd.to_datetime(event['created_at']).strftime('%Y-%m-%d %H:%M:%S')
+                
+                st.markdown(f"""
+                <div style="padding: 10px; margin: 5px 0; background-color: #f8f9fa; border-radius: 5px; border-left: 4px solid #667eea;">
+                    <strong>🔍 {event['event_type'].title()}</strong> - {model_name}<br>
+                    <small>👤 By: {admin_name} | ⏰ {event_time}</small>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("📝 No recent model activity to display")
+
+    # --- Digital Model Collection Tab ---
+    with tab3:
+        st.markdown('<div class="tab-header">🏛️ Digital Model Collection Manager</div>', unsafe_allow_html=True)
+        
+        # Overview metrics for models
+        models_df = fetch_models()
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            total_models = len(models_df) if not models_df.empty else 0
+            st.metric("🏛️ Total Models", total_models)
+        
+        with col2:
+            events_df = fetch_model_events(limit=1000)  # Get more events for counting
+            total_scans = len(events_df) if not events_df.empty else 0
+            st.metric("📱 Total Scans", total_scans)
+            
+        with col3:
+            sessions_df = fetch_view_sessions(limit=1000)
+            total_sessions = len(sessions_df) if not sessions_df.empty else 0
+            st.metric("👀 Total Sessions", total_sessions)
+        
+        # Main tabs for model management
+        tab_browse, tab_add, tab_analytics, tab_remove = st.tabs(["📋 Browse Models", "➕ Add New Model", "📊 Model Analytics", "🗑️ Remove Model"])
+        
+        with tab_browse:
+            st.markdown("### 📚 Current Model Collection")
+            
+            if not models_df.empty:
+                # Enhanced model display with statistics
+                for idx, model in models_df.iterrows():
+                    model_id = model['id']
+                    model_name = model['qr_name']
+                    model_desc = model.get('description', 'No description available')
+                    scale_factor = model.get('scale_factor', 1.0)
+                    
+                    # Get stats for this model
+                    model_events = fetch_model_events(model_id=model_id, limit=100)
+                    model_sessions = fetch_view_sessions(model_id=model_id, limit=100)
+                    
+                    scans_count = len(model_events) if not model_events.empty else 0
+                    sessions_count = len(model_sessions) if not model_sessions.empty else 0
+                    
+                    # Calculate average session duration
+                    avg_duration = 0
+                    if not model_sessions.empty and 'duration_seconds' in model_sessions.columns:
+                        valid_durations = model_sessions['duration_seconds'].dropna()
+                        avg_duration = valid_durations.mean() if len(valid_durations) > 0 else 0
+                    
+                    with st.expander(f"🏛️ {model_name}", expanded=False):
+                        col_a, col_b = st.columns([2, 1])
+                        
+                        with col_a:
+                            st.write(f"**Description:** {model_desc}")
+                            st.write(f"**Scale Factor:** {scale_factor}x")
+                            st.write(f"**Model ID:** {model_id}")
+                            
+                        with col_b:
+                            st.metric("📱 Scans", scans_count)
+                            st.metric("👀 Sessions", sessions_count)
+                            if avg_duration > 0:
+                                st.metric("⏱️ Avg Duration", f"{int(avg_duration/60)}m {int(avg_duration%60)}s")
+                        
+                        # Recent activity for this model
+                        if not model_events.empty:
+                            st.markdown("**Recent Activity:**")
+                            recent_events = model_events.head(3)
+                            for _, event in recent_events.iterrows():
+                                event_time = pd.to_datetime(event['created_at']).strftime('%Y-%m-%d %H:%M')
+                                st.text(f"📱 {event['event_type'].title()} - {event_time}")
+            else:
+                st.info("🏛️ No models in collection yet. Add your first model below!")
         
         with tab_add:
             st.markdown('<div class="prediction-form">', unsafe_allow_html=True)
-            with st.form("add_artifact_form"):
-                st.markdown("### 🏛️ New Artifact Registration")
+            with st.form("add_model_form"):
+                st.markdown("### 🏛️ New Digital Model Registration")
                 
                 col1, col2 = st.columns(2)
                 with col1:
-                    artifact_name = st.text_input("🏷️ Artifact Name", placeholder="Enter artifact name...")
-                    artifact_type = st.text_input("📋 Artifact Type", placeholder="e.g., Painting, Sculpture, Manuscript...")
+                    model_qr_name = st.text_input("🏷️ QR Name/ID", placeholder="Enter unique QR identifier...")
+                    model_scale = st.number_input("📏 Scale Factor", min_value=0.1, max_value=100.0, value=1.0, step=0.1)
                 
                 with col2:
-                    artifact_date = st.date_input("📅 Date Acquired")
+                    model_desc = st.text_area("📝 Description", placeholder="Describe this digital model...", height=100)
                 
-                artifact_desc = st.text_area("📝 Description", placeholder="Provide detailed description of the artifact...", height=100)
-                
-                add_submit = st.form_submit_button("✨ Register Artifact", use_container_width=True)
+                add_submit = st.form_submit_button("✨ Register Model", use_container_width=True)
             st.markdown('</div>', unsafe_allow_html=True)
             
             if add_submit:
-                if artifact_name and artifact_desc and artifact_date and artifact_type:
+                if model_qr_name and model_desc:
                     try:
                         if supabase:
-                            result = supabase.table("artifacts").insert({
-                                "name": artifact_name,
-                                "description": artifact_desc,
-                                "date_acquired": str(artifact_date),
-                                "type": artifact_type
+                            result = supabase.table("models").insert({
+                                "qr_name": model_qr_name,
+                                "description": model_desc,
+                                "scale_factor": model_scale
                             }).execute()
                             if result.data:
-                                st.success(f"✅ Artifact '{artifact_name}' added successfully!")
+                                st.success(f"✅ Model '{model_qr_name}' added successfully!")
+                                st.balloons()
+                                st.rerun()  # Refresh to show new model
                             else:
-                                st.error(f"❌ Failed to add artifact: {result}")
+                                st.error(f"❌ Failed to add model: {result}")
                         else:
-                            st.success(f"✅ Artifact '{artifact_name}' would be added (Supabase not configured)")
+                            st.success(f"✅ Model '{model_qr_name}' would be added (Supabase not configured)")
                     except Exception as e:
-                        st.error(f"❌ Error: {e}")
+                        if "duplicate key value violates unique constraint" in str(e):
+                            st.error(f"❌ Error: QR Name '{model_qr_name}' already exists. Please choose a unique name.")
+                        else:
+                            st.error(f"❌ Error: {e}")
                 else:
-                    st.error("❌ All fields are required.")
+                    st.error("❌ QR Name and Description are required.")
+        
+        with tab_analytics:
+            st.markdown("### � Model Performance Analytics")
+            
+            if not models_df.empty:
+                # Model popularity chart
+                events_df = fetch_model_events(limit=500)
+                if not events_df.empty:
+                    # Extract model names from events
+                    model_scan_counts = {}
+                    for _, event in events_df.iterrows():
+                        if event.get('models') and isinstance(event['models'], dict):
+                            model_name = event['models'].get('qr_name', 'Unknown')
+                            model_scan_counts[model_name] = model_scan_counts.get(model_name, 0) + 1
+                    
+                    if model_scan_counts:
+                        col_chart1, col_chart2 = st.columns(2)
+                        
+                        with col_chart1:
+                            # Most popular models
+                            fig = px.bar(
+                                x=list(model_scan_counts.keys()),
+                                y=list(model_scan_counts.values()),
+                                labels={'x': 'Model QR Name', 'y': 'Number of Scans'},
+                                title="📱 Most Scanned Models",
+                                color=list(model_scan_counts.values()),
+                                color_continuous_scale='Blues'
+                            )
+                            fig.update_layout(height=400)
+                            st.plotly_chart(fig, use_container_width=True)
+                        
+                        with col_chart2:
+                            # Session duration analysis
+                            sessions_df = fetch_view_sessions(limit=200)
+                            if not sessions_df.empty and 'duration_seconds' in sessions_df.columns:
+                                # Filter out null durations
+                                valid_sessions = sessions_df.dropna(subset=['duration_seconds'])
+                                if not valid_sessions.empty:
+                                    fig = px.histogram(
+                                        valid_sessions,
+                                        x='duration_seconds',
+                                        nbins=20,
+                                        title="⏱️ Session Duration Distribution",
+                                        labels={'duration_seconds': 'Duration (seconds)', 'count': 'Number of Sessions'}
+                                    )
+                                    fig.update_layout(height=400)
+                                    st.plotly_chart(fig, use_container_width=True)
+                
+                # Time-based analysis
+                st.markdown("#### 📅 Activity Over Time")
+                if not events_df.empty:
+                    # Group events by date
+                    events_df['date'] = pd.to_datetime(events_df['created_at']).dt.date
+                    daily_scans = events_df.groupby('date').size().reset_index(name='scans')
+                    
+                    fig = px.line(
+                        daily_scans,
+                        x='date',
+                        y='scans',
+                        title="📈 Daily Model Scan Activity",
+                        labels={'date': 'Date', 'scans': 'Number of Scans'}
+                    )
+                    fig.update_layout(height=350)
+                    st.plotly_chart(fig, use_container_width=True)
+                
+            else:
+                st.info("📊 No analytics available - add some models and generate activity first!")
         
         with tab_remove:
-            st.markdown("### 🗑️ Remove Existing Artifacts")
-            if supabase:
-                try:
-                    artifacts_data = supabase.table("artifacts").select('*').execute().data
-                    if artifacts_data:
-                        artifacts_df = pd.DataFrame(artifacts_data)
-                        artifact_to_remove = st.selectbox("Select Artifact to Remove", artifacts_df["name"].tolist())
-                        remove_submit = st.button("🗑️ Remove Selected Artifact", type="primary")
-                        
-                        if remove_submit and artifact_to_remove:
-                            try:
-                                result = supabase.table("artifacts").delete().eq("name", artifact_to_remove).execute()
+            st.markdown("### 🗑️ Remove Digital Models")
+            if not models_df.empty:
+                model_to_remove = st.selectbox(
+                    "Select Model to Remove", 
+                    models_df["qr_name"].tolist(),
+                    help="⚠️ This will also remove all associated events and sessions"
+                )
+                
+                if model_to_remove:
+                    # Show details of selected model
+                    selected_model = models_df[models_df["qr_name"] == model_to_remove].iloc[0]
+                    st.write(f"**Description:** {selected_model.get('description', 'N/A')}")
+                    st.write(f"**Scale Factor:** {selected_model.get('scale_factor', 1.0)}x")
+                    
+                    # Show impact of removal
+                    model_id = selected_model['id']
+                    model_events_count = len(fetch_model_events(model_id=model_id))
+                    model_sessions_count = len(fetch_view_sessions(model_id=model_id))
+                    
+                    if model_events_count > 0 or model_sessions_count > 0:
+                        st.warning(f"⚠️ This model has {model_events_count} scan events and {model_sessions_count} view sessions that will also be removed.")
+                    
+                    remove_submit = st.button("🗑️ Remove Selected Model", type="primary")
+                    
+                    if remove_submit:
+                        try:
+                            if supabase:
+                                result = supabase.table("models").delete().eq("qr_name", model_to_remove).execute()
                                 if result.data:
-                                    st.success(f"✅ Artifact '{artifact_to_remove}' removed successfully!")
-                                    st.rerun()
+                                    st.success(f"✅ Model '{model_to_remove}' and all associated data removed successfully!")
+                                    st.rerun()  # Refresh the page
                                 else:
-                                    st.error(f"❌ Failed to remove artifact: {result}")
-                            except Exception as e:
-                                st.error(f"❌ Error: {e}")
-                    else:
-                        st.info("📋 No artifacts available to remove.")
-                except Exception as e:
-                    st.error(f"❌ Error fetching artifacts: {e}")
+                                    st.error(f"❌ Failed to remove model: {result}")
+                            else:
+                                st.success(f"✅ Model '{model_to_remove}' would be removed (Supabase not configured)")
+                        except Exception as e:
+                            st.error(f"❌ Error: {e}")
             else:
-                st.info("⚠️ Supabase not configured. Cannot manage artifacts.")
+                st.info("📋 No models available to remove.")
 
     # --- User Management Tab ---
     with tab4:
         st.markdown('<div class="tab-header">👨‍💼 User Management Portal</div>', unsafe_allow_html=True)
         
-        def add_user_supabase(email, password, email_confirm=True):
-            try:
-                if supabase:
-                    result = supabase.auth.admin.create_user({
-                        "email": email,
-                        "password": password,
-                        "email_confirm": email_confirm
-                    })
-                    return result
-                else:
-                    return {"success": f"User {email} would be created (Supabase not configured)"}
-            except Exception as e:
-                return {"error": str(e)}
-
-        st.markdown("#### ➕ Create New User Account")
+        st.markdown("#### ➕ Create New Admin Account")
         st.markdown('<div class="prediction-form">', unsafe_allow_html=True)
         
-        with st.form("add_user_form"):
-            col1, col2 = st.columns(2)
+        with st.form("add_admin_form"):
+            col1, col2, col3 = st.columns(3)
             with col1:
-                user_email = st.text_input("📧 Email Address", placeholder="user@example.com")
+                new_username = st.text_input("👤 Username", placeholder="admin_user")
             with col2:
-                user_password = st.text_input("🔒 Password", type="password", placeholder="Enter secure password")
-            add_user_submit = st.form_submit_button("🚀 Create User Account", use_container_width=True)
+                new_email = st.text_input("📧 Email Address", placeholder="user@example.com")
+            with col3:
+                new_password = st.text_input("🔒 Password", type="password", placeholder="Enter secure password")
+            
+            new_role = st.selectbox("🎭 Role", ["admin", "manager", "analyst"], index=0)
+            add_admin_submit = st.form_submit_button("🚀 Create Admin Account", use_container_width=True)
         
         st.markdown('</div>', unsafe_allow_html=True)
         
-        if add_user_submit:
-            if user_email and user_password:
-                result = add_user_supabase(user_email, user_password)
-                if hasattr(result, 'user') and result.user:
-                    st.success(f"✅ User '{user_email}' created successfully!")
-                elif hasattr(result, 'error') and result.error:
-                    st.error(f"❌ Error: {result.error}")
-                elif isinstance(result, dict) and result.get("error"):
-                    st.error(f"❌ Error: {result['error']}")
-                elif isinstance(result, dict) and result.get("success"):
-                    st.success(result["success"])
+        if add_admin_submit:
+            if new_username and new_email and new_password:
+                result = create_admin_account(new_username, new_password, new_email, new_role)
+                if result.get("success"):
+                    st.success(f"✅ Admin account '{new_username}' created successfully!")
+                    st.rerun()  # Refresh to show new user in the list
                 else:
-                    st.info(f"ℹ️ Result: {result}")
+                    st.error(f"❌ Error: {result.get('error', 'Unknown error occurred')}")
             else:
-                st.error("❌ Email and password are required.")
+                st.error("❌ All fields are required.")
         
         st.markdown("---")
         
-        # Demo user list
-        st.markdown("#### 👥 Current Demo Users")
-        demo_users_df = pd.DataFrame({
-            'Username': ['admin', 'manager', 'analyst'],
-            'Password': ['admin123', 'manager123', 'analyst123'],
-            'Role': ['Administrator', 'Manager', 'Data Analyst'],
-            'Status': ['Active', 'Active', 'Active']
-        })
-        
-        st.dataframe(demo_users_df, use_container_width=True, hide_index=True)
-        st.info("💡 These are demo credentials for testing the authentication system.")
+        # Current admin users from database
+        st.markdown("#### 👥 Current Admin Users")
+        try:
+            if supabase:
+                # Fetch all admin users from the database
+                response = supabase.table("admin_users").select(
+                    "id, username, email, role, created_at, last_login"
+                ).execute()
+                
+                if response.data:
+                    users_df = pd.DataFrame(response.data)
+                    # Format the datetime columns for better display
+                    if 'created_at' in users_df.columns:
+                        users_df['created_at'] = pd.to_datetime(users_df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
+                    if 'last_login' in users_df.columns:
+                        users_df['last_login'] = pd.to_datetime(users_df['last_login'], errors='coerce').dt.strftime('%Y-%m-%d %H:%M')
+                        users_df['last_login'] = users_df['last_login'].fillna('Never')
+                    
+                    # Rename columns for display
+                    display_columns = {
+                        'id': 'ID',
+                        'username': 'Username', 
+                        'email': 'Email',
+                        'role': 'Role',
+                        'created_at': 'Created At',
+                        'last_login': 'Last Login'
+                    }
+                    users_df = users_df.rename(columns=display_columns)
+                    
+                    st.dataframe(users_df, use_container_width=True, hide_index=True)
+                    st.success(f"📊 Found {len(users_df)} admin user(s) in the database")
+                else:
+                    st.info("� No admin users found in the database. Create the first admin account above.")
+            else:
+                st.warning("⚠️ Database connection not available. Cannot display current users.")
+        except Exception as e:
+            st.error(f"❌ Error loading users: {str(e)}")
+            st.info("💡 Make sure the admin_users table exists in your database.")
