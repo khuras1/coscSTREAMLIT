@@ -1,3 +1,62 @@
+# Supabase logout function (Python equivalent)
+def logout():
+    """
+    Log out the current user using Supabase authentication.
+    """
+    if not supabase:
+        print("Supabase client not initialized.")
+        return
+    try:
+        response = supabase.auth.sign_out()
+        error = response.get('error', None)
+        if error:
+            print(f"Logout error: {error}")
+        else:
+            print("User logged out successfully")
+    except Exception as e:
+        print(f"Logout exception: {e}")
+
+# Supabase get current user function (Python equivalent)
+def get_current_user():
+    """
+    Get the current authenticated user from Supabase.
+    """
+    if not supabase:
+        print("Supabase client not initialized.")
+        return None
+    try:
+        response = supabase.auth.get_user()
+        print(f"Current user: {response}")
+        return response
+    except Exception as e:
+        print(f"Get user exception: {e}")
+        return None
+
+# Supabase auth state change handler (Python equivalent)
+def on_auth_state_change(event, session):
+    print(f"Auth event: {event}")
+    print(f"Session: {session}")
+# Supabase sign up and authentication function (Python equivalent)
+def sign_up(email, password):
+    """
+    Sign up a new user using Supabase authentication.
+    Returns the user data if successful, None otherwise.
+    """
+    if not supabase:
+        print("Supabase client not initialized.")
+        return None
+    try:
+        response = supabase.auth.sign_up({"email": email, "password": password})
+        data = response.get('data', {})
+        error = response.get('error', None)
+        if error:
+            print(f"Sign up error: {error}")
+            return None
+        print(f"User signed up: {data.get('user')}")
+        return data.get('user')
+    except Exception as e:
+        print(f"Sign up exception: {e}")
+        return None
 import streamlit as st
 import pandas as pd
 import joblib
@@ -303,26 +362,10 @@ def show_login_page():
             font-weight: 800;
             margin-bottom: 2rem;
         }
-        .login-form {
-            background: rgba(255, 255, 255, 0.95);
-            padding: 2rem;
-            border-radius: 15px;
-            backdrop-filter: blur(10px);
-        }
-        .demo-credentials {
-            background: rgba(255, 255, 255, 0.1);
-            padding: 1rem;
-            border-radius: 10px;
-            margin: 1rem 0;
-            color: white;
-            font-size: 0.9rem;
-        }
     </style>
     """, unsafe_allow_html=True)
-    
-    # Center the login form
+    # Center the login/sign up form
     col1, col2, col3 = st.columns([1, 2, 1])
-    
     with col2:
         st.markdown("""
         <div class="login-container">
@@ -331,26 +374,65 @@ def show_login_page():
             </div>
             <div class="demo-credentials">
                 <strong>🔐 Secure Database Authentication</strong><br>
-                Please use your admin credentials to log in.
+                Please use your credentials to log in or sign up.
             </div>
         </div>
         """, unsafe_allow_html=True)
-        
         st.markdown('<div class="login-form">', unsafe_allow_html=True)
-        
-        with st.form("login_form"):
-            st.markdown("### 🔐 Please Login to Continue")
-            
-            username = st.text_input("👤 Username", placeholder="Enter your username")
+        with st.form("auth_form"):
+            st.markdown("### 🔐 Login or Sign Up")
+            email = st.text_input("📧 Email", placeholder="Enter your email")
             password = st.text_input("🔒 Password", type="password", placeholder="Enter your password")
-            
-            col_login, col_reset = st.columns([2, 1])
-            
-            with col_login:
-                login_button = st.form_submit_button("🚀 Login", use_container_width=True)
-            
+            action = st.radio("Choose action", ["Login", "Sign Up"])
+            col_submit, col_reset = st.columns([2, 1])
+            with col_submit:
+                submit_button = st.form_submit_button("🚀 Submit", use_container_width=True)
             with col_reset:
                 if st.form_submit_button("🔄 Reset", use_container_width=True):
+                    st.session_state.login_attempts = 0
+                    st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        if submit_button:
+            if email and password:
+                if st.session_state.login_attempts >= 5:
+                    st.error("🚫 Too many failed attempts. Please refresh the page.")
+                else:
+                    if action == "Sign Up":
+                        user = sign_up(email, password)
+                        if user:
+                            st.success(f"User signed up: {user}")
+                            st.balloons()
+                        else:
+                            st.error("Sign up failed. Please check your credentials.")
+                    elif action == "Login":
+                        try:
+                            if not supabase:
+                                st.error("Supabase client not initialized.")
+                            else:
+                                response = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                                data = response.get('data', {})
+                                error = response.get('error', None)
+                                if error:
+                                    st.error(f"Login error: {error}")
+                                    st.session_state.login_attempts += 1
+                                elif data.get('user'):
+                                    st.session_state.logged_in = True
+                                    st.session_state.username = email
+                                    st.session_state.login_attempts = 0
+                                    st.success(f"✅ Welcome, {email}!")
+                                    st.balloons()
+                                    st.rerun()
+                                else:
+                                    st.error("Login failed. Please check your credentials.")
+                                    st.session_state.login_attempts += 1
+                        except Exception as e:
+                            st.error(f"Login exception: {e}")
+                            st.session_state.login_attempts += 1
+            else:
+                st.warning("⚠️ Please enter both email and password.")
+        # Show login attempts warning
+        if st.session_state.login_attempts > 0:
+            st.info(f"🔢 Login attempts: {st.session_state.login_attempts}/5")
                     st.session_state.login_attempts = 0
                     st.rerun()
         
