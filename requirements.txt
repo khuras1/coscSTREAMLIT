@@ -1,0 +1,12 @@
+
+streamlit
+pandas
+joblib
+altair
+plotly
+python-dotenv
+supabase
+numpy
+matplotlib
+seaborn
+scikit-learn==1.6.1

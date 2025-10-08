@@ -624,6 +624,27 @@ else:
                                 "🗓️ Season",
                                 [opt.split(' ', 1)[1] for opt in categorical_options['env_season']]
                             )
+                            # Add missing required fields for prediction
+                            user_inputs['daily_peak_hour'] = st.number_input(
+                                "⏰ Daily Peak Hour",
+                                min_value=0, max_value=23, value=12, step=1,
+                                help="Hour of the day with the highest visitor count"
+                            )
+                            user_inputs['visitor_visit_frequency'] = st.number_input(
+                                "🔁 Visitor Visit Frequency",
+                                min_value=1, max_value=100, value=1, step=1,
+                                help="How often the visitor comes (per month)"
+                            )
+                            user_inputs['daily_total_scans'] = st.number_input(
+                                "📱 Daily Total Scans",
+                                min_value=0, max_value=10000, value=100, step=1,
+                                help="Total QR code scans for the day"
+                            )
+                            user_inputs['daily_avg_duration'] = st.number_input(
+                                "⏱️ Daily Avg Duration (min)",
+                                min_value=0.0, max_value=480.0, value=30.0, step=1.0,
+                                help="Average visit duration in minutes"
+                            )
                         
                         with col_right:
                             st.markdown("**👤 Visitor Profile**")
